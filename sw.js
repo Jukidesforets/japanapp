@@ -1,5 +1,5 @@
 // Cache complet de l'app pour l'usage hors ligne. Changer VERSION à chaque mise en ligne.
-const VERSION = 'n5-v1';
+const VERSION = 'n5-v2';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'data/vocab.json',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', e => e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting())));
