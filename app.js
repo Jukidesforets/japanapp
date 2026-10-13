@@ -4,6 +4,7 @@
 const DAY = 86400000;
 const STEPS = [1, 3, 7, 16, 35, 80];       // jours entre deux révisions réussies
 const STORE = 'n5.progress.v1';
+const PRACTICE = 20;                       // mots par séance d'entraînement libre
 const LESSONS = Array.from({ length: 12 }, (_, i) => i + 1);
 
 let VOCAB = [];
@@ -25,11 +26,8 @@ function save() {
 
 // ---------- Dates ----------
 function startOfDay(t) { const d = new Date(t); d.setHours(4, 0, 0, 0); if (d.getTime() > t) d.setDate(d.getDate() - 1); return d.getTime(); }
-// Premier test : le soir même à 17 h, ou 4 h plus tard si le mot est coché l'après-midi.
-function firstDue(now) {
-  const evening = new Date(now); evening.setHours(17, 0, 0, 0);
-  return Math.max(evening.getTime(), now + 4 * 3600000);
-}
+// Un mot ajouté peut être révisé tout de suite.
+function firstDue(now) { return now; }
 // Les révisions espacées sont dues dès 4 h du matin du jour prévu.
 function dueInDays(now, days) { return startOfDay(now) + days * DAY; }
 
@@ -128,13 +126,17 @@ function home() {
     </div>
     ${exportOld ? `<div class="notice">Pense à exporter ta sauvegarde : sur iPhone, les données d'un site peuvent être effacées. <button class="link" data-go="backup">Exporter</button></div>` : ''}
     <div class="sticky">
-      <button class="primary" data-start ${due ? '' : 'disabled'}>Réviser${due ? ` (${due})` : ''}</button>
+      ${due || !total ? `<button class="primary" data-start ${due ? '' : 'disabled'}>Réviser${due ? ` (${due})` : ''}</button>`
+        : `<button class="primary" data-practice>S'entraîner (${Math.min(total, PRACTICE)} mots)</button>
+           <div class="muted" style="text-align:center">Rien à réviser pour l'instant : l'entraînement ne change pas tes dates de révision.</div>`}
       <button data-go="add">Ajouter les mots vus dans Genki</button>
     </div>`);
   $app.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { state.mode = b.dataset.mode; save(); home(); });
   bindGo();
   const s = $app.querySelector('[data-start]');
-  if (s) s.onclick = startSession;
+  if (s) s.onclick = () => startSession(false);
+  const pr = $app.querySelector('[data-practice]');
+  if (pr) pr.onclick = () => startSession(true);
   ui.flash = '';
 }
 
@@ -188,7 +190,7 @@ function addScreen() {
     const now = Date.now(), k = ui.pending.size;
     ui.pending.forEach(id => addCard(id, now));
     ui.pending.clear(); save();
-    ui.flash = `${k} mot${k > 1 ? 's' : ''} ajouté${k > 1 ? 's' : ''}. Premier test ${fmtWhen(firstDue(now))}.`;
+    ui.flash = `${k} mot${k > 1 ? 's' : ''} ajouté${k > 1 ? 's' : ''} : tu peux les réviser dès maintenant.`;
     ui.screen = 'home'; render();
   };
   const q = $app.querySelector('#q');
@@ -216,9 +218,12 @@ function addScreen() {
 }
 
 // ---------- Session de révision ----------
-function startSession() {
-  const ids = dueIds();
-  ui.session = { queue: ids, retried: new Set(), i: 0, total: ids.length, ok: 0, ko: 0, revealed: false, answer: '', verdict: null };
+// Entraînement libre : les mots les plus proches de leur prochaine révision, sans toucher au planning.
+function startSession(practice) {
+  const ids = practice
+    ? Object.entries(state.cards).sort(([, a], [, b]) => a.due - b.due).slice(0, PRACTICE).map(([id]) => id)
+    : dueIds();
+  ui.session = { practice, queue: ids, retried: new Set(), i: 0, total: ids.length, ok: 0, ko: 0, revealed: false, answer: '', verdict: null };
   ui.screen = 'review';
   render();
 }
@@ -278,7 +283,7 @@ function reviewScreen() {
 function record(id, ok) {
   const s = ui.session;
   if (s.retried.has(id)) return;
-  grade(id, ok);
+  if (!s.practice) grade(id, ok);
   ok ? s.ok++ : s.ko++;
   if (!ok) { s.retried.add(id); s.queue.push(id); }
   save();
@@ -291,7 +296,7 @@ function doneScreen() {
     <h1>Session terminée</h1>
     <div class="stats">
       <section class="panel"><h2 style="color:var(--ok)">${s.ok}</h2><div class="muted">réussies</div></section>
-      <section class="panel"><h2 style="color:var(--ko)">${s.ko}</h2><div class="muted">à revoir demain</div></section>
+      <section class="panel"><h2 style="color:var(--ko)">${s.ko}</h2><div class="muted">${s.practice ? 'à retravailler' : 'à revoir demain'}</div></section>
     </div>
     ${dueIds().length ? `<p>Il reste ${dueIds().length} révisions dues.</p>` : nd ? `<p class="muted">Prochaine révision ${fmtWhen(nd)}.</p>` : ''}
     <div class="sticky"><button class="primary" data-go="home">Retour à l'accueil</button></div>`);
@@ -333,6 +338,9 @@ async function init() {
   VOCAB = (await r.json()).vocab;
   BY_ID = Object.fromEntries(VOCAB.map(v => [v.id, v]));
   for (const id of Object.keys(state.cards)) if (!BY_ID[id]) delete state.cards[id];
+  // Les mots ajoutés avant la v3 attendaient le soir : ils deviennent révisables tout de suite.
+  for (const c of Object.values(state.cards)) if (c.reviews === 0) c.due = Math.min(c.due, c.added);
+  save();
   render();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
