@@ -9,7 +9,7 @@ const LESSONS = Array.from({ length: 12 }, (_, i) => i + 1);
 let VOCAB = [];
 let BY_ID = {};
 let state = load();
-let ui = { screen: 'home', lesson: 1, query: '', session: null };
+let ui = { screen: 'home', lesson: 1, query: '', session: null, pending: new Set(), flash: '' };
 
 // ---------- Stockage ----------
 function load() {
@@ -109,6 +109,7 @@ function home() {
   const exportOld = total > 0 && Date.now() - (state.lastExport || state.created) > 7 * DAY;
   h(`
     <div class="top"><h1>Révisions N5</h1><button class="link" data-go="backup">Sauvegarde</button></div>
+    ${ui.flash ? `<div class="notice">${esc(ui.flash)}</div>` : ''}
     <section class="panel">
       <div class="big">${due}</div>
       <div>${due === 1 ? 'révision due' : 'révisions dues'}</div>
@@ -134,6 +135,7 @@ function home() {
   bindGo();
   const s = $app.querySelector('[data-start]');
   if (s) s.onclick = startSession;
+  ui.flash = '';
 }
 
 function bindGo() { $app.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { ui.screen = b.dataset.go; render(); }); }
@@ -148,44 +150,68 @@ function wordsForView() {
   return VOCAB.filter(v => v.l === ui.lesson);
 }
 
+// Les mots cochés restent en attente (ui.pending) jusqu'au bouton « Ajouter » ;
+// décocher un mot déjà ajouté le retire tout de suite.
 function addScreen() {
   const list = wordsForView();
-  const allOn = list.length && list.every(v => state.cards[v.id]);
+  const on = v => !!state.cards[v.id] || ui.pending.has(v.id);
+  const allOn = list.length && list.every(on);
+  const n = ui.pending.size;
   h(`
-    <div class="top"><button class="link" data-go="home">‹ Accueil</button><h1>Mots vus</h1><span></span></div>
+    <div class="top"><button class="link" id="back">‹ Accueil</button><h1>Mots vus</h1><span></span></div>
     <input type="search" id="q" placeholder="Chercher : いぬ, 犬, chien…" value="${esc(ui.query)}" autocomplete="off">
     ${ui.query ? '' : `<div class="chips" role="group">
       ${LESSONS.map(l => `<button data-l="${l}" aria-pressed="${ui.lesson === l}">Leçon ${l}</button>`).join('')}
       <button data-l="autres" aria-pressed="${ui.lesson === 'autres'}">Autres mots N5</button>
     </div>`}
-    <div class="row"><span class="muted">${list.length} mots · ${list.filter(v => state.cards[v.id]).length} cochés</span>
+    <div class="row"><span class="muted" id="count"></span>
       ${list.length ? `<button class="link" id="all" style="text-align:right">${allOn ? 'Tout décocher' : 'Tout cocher'}</button>` : ''}</div>
     <ul class="words">
-      ${list.map(v => `<li><label><input type="checkbox" data-id="${v.id}" ${state.cards[v.id] ? 'checked' : ''}>
-        <span><span class="w-jp">${esc(v.alt)}</span> <span class="w-sub jp">${esc(v.kana)}</span><br><span class="w-sub">${esc(v.fr)}</span></span></label></li>`).join('')}
+      ${list.map(v => `<li><label><input type="checkbox" data-id="${v.id}" ${on(v) ? 'checked' : ''}>
+        <span><span class="w-jp">${esc(v.alt)}</span>${v.kana !== v.alt ? ` <span class="w-sub jp">${esc(v.kana)}</span>` : ''}${state.cards[v.id] ? ' <span class="tag">ajouté</span>' : ''}<br><span class="w-sub">${esc(v.fr)}</span></span></label></li>`).join('')}
     </ul>
-    ${list.length ? '' : '<p class="muted">Aucun mot trouvé.</p>'}`);
-  bindGo();
+    ${list.length ? '' : '<p class="muted">Aucun mot trouvé.</p>'}
+    <div class="sticky"><button class="primary" id="commit"></button></div>`);
+  const refresh = () => {
+    const k = ui.pending.size;
+    $app.querySelector('#count').textContent = `${list.length} mots · ${list.filter(on).length} cochés`;
+    const b = $app.querySelector('#commit');
+    b.disabled = !k;
+    b.textContent = k ? `Ajouter ${k} mot${k > 1 ? 's' : ''} à mes révisions` : 'Coche les mots vus dans Genki';
+  };
+  refresh();
+  $app.querySelector('#back').onclick = () => {
+    if (n && !confirm(`Quitter sans ajouter les ${ui.pending.size} mots cochés ?`)) return;
+    ui.pending.clear(); ui.screen = 'home'; render();
+  };
+  $app.querySelector('#commit').onclick = () => {
+    const now = Date.now(), k = ui.pending.size;
+    ui.pending.forEach(id => addCard(id, now));
+    ui.pending.clear(); save();
+    ui.flash = `${k} mot${k > 1 ? 's' : ''} ajouté${k > 1 ? 's' : ''}. Premier test ${fmtWhen(firstDue(now))}.`;
+    ui.screen = 'home'; render();
+  };
   const q = $app.querySelector('#q');
-  q.oninput = () => { ui.query = q.value; const pos = q.selectionStart; addScreen(); const n = $app.querySelector('#q'); n.focus(); n.setSelectionRange(pos, pos); };
+  q.oninput = () => { ui.query = q.value; const pos = q.selectionStart; addScreen(); const nq = $app.querySelector('#q'); nq.focus(); nq.setSelectionRange(pos, pos); };
   $app.querySelectorAll('[data-l]').forEach(b => b.onclick = () => { ui.lesson = b.dataset.l === 'autres' ? 'autres' : +b.dataset.l; addScreen(); });
   $app.querySelectorAll('input[data-id]').forEach(cb => cb.onchange = () => {
-    const c = state.cards[cb.dataset.id];
-    if (cb.checked) addCard(cb.dataset.id);
-    else if (!c || c.reviews === 0 || confirm('Retirer ce mot et sa progression ?')) removeCard(cb.dataset.id);
+    const id = cb.dataset.id, c = state.cards[id];
+    if (cb.checked) { if (!c) ui.pending.add(id); }
+    else if (ui.pending.has(id)) ui.pending.delete(id);
+    else if (c.reviews === 0 || confirm('Retirer ce mot et sa progression ?')) { removeCard(id); save(); return addScreen(); }
     else cb.checked = true;
-    save();
-    const info = $app.querySelector('.row .muted');
-    info.textContent = `${list.length} mots · ${list.filter(v => state.cards[v.id]).length} cochés`;
+    refresh();
   });
   const all = $app.querySelector('#all');
   if (all) all.onclick = () => {
     if (allOn) {
-      const reviewed = list.filter(v => state.cards[v.id] && state.cards[v.id].reviews > 0).length;
-      if (reviewed && !confirm(`Retirer ces ${list.length} mots, dont ${reviewed} déjà révisés ?`)) return;
-      list.forEach(v => removeCard(v.id));
-    } else list.forEach(v => addCard(v.id));
-    save(); addScreen();
+      const added = list.filter(v => state.cards[v.id]);
+      const reviewed = added.filter(v => state.cards[v.id].reviews > 0).length;
+      if (added.length && !confirm(`Retirer ${added.length} mots déjà ajoutés${reviewed ? `, dont ${reviewed} déjà révisés` : ''} ?`)) return;
+      list.forEach(v => { ui.pending.delete(v.id); removeCard(v.id); });
+      save();
+    } else list.forEach(v => { if (!state.cards[v.id]) ui.pending.add(v.id); });
+    addScreen();
   };
 }
 
